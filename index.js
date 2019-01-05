@@ -14,10 +14,16 @@ const net = new brain.recurrent.LSTM();
 net.fromJSON(JSON.parse(fs.readFileSync("network.json", "utf8")))
 console.log("Loaded from JSON");
 
-setInterval(() => {
-    fs.writeFile("network.json", JSON.stringify(net.toJSON()));
-    console.log("Saved!");
-}, 1000 * 60 * 10) // Save every 10 minutes
+class Message{
+    constructor(message){
+        this.date = Date.now();
+        this.content = message.content;
+        this.channel = message.channel.name;
+    }
+}
+
+var messages = [];
+var conversation_timeout = 1000 * 60; // One minute is the timeout for a conversation.
 
 
 /* Simple emitter, works just like Discord.js och Socket.io */
@@ -31,6 +37,10 @@ class Emitter {
     emit(callsign, content) {
         this.content[callsign](content);
     }
+    test(callsign){
+        if(this.content[callsign] !== undefined) return true;
+            return false;
+    }
 }
 
 // Set new commands with commands.on(COMMAND_NAME, DiscordMessage => { CODE_HERE })
@@ -38,9 +48,9 @@ const commands = new Emitter();
 
 commands.on("talk", message => {
     // Talk with user.
-    var run_data = message.content.substr(message.content.indexOf(" ")).trim();
+    var run_data = message.content.substr(message.content.indexOf(" ")+1).trim();
     var response = net.run(run_data);
-    console.log("Response: ", response);
+    console.log("Talk | Input: '" + run_data + "' Response: '" + response + "'");
     message.reply(response);
 })
 
@@ -51,36 +61,50 @@ commands.on("train", message => {
     if (text.indexOf(":") === -1) err = "This data is not formated correctly, please see !help";
 
     var train_input = text.substr("!train ".length);
-    train_input = train_input.substr(0, train_input.indexOf(":"));
+        train_input = train_input.substr(0, train_input.indexOf(":"));
+
     var train_output = text.substr(text.indexOf(":") + 1);
 
     train_input = train_input.trim();
     train_output = train_output.trim();
 
     if (train_input.length < 1) err = "Input data is too short.";
-    if (train_output.leakyReluAlpha < 1) err = "Train output is too short.";
+    if (train_output.length < 1) err = "Train output is too short.";
 
     if (err !== null) {
         message.reply(err);
         return;
     }
-
+    
     console.log("Training data: ", {
         train_input,
         train_output
     });
+
+    train(train_input, train_output);
+});
+
+function train(input, output){
+
+    input = input.trim();
+    output = output.trim();
+
+    if (input.length < 1 || output.length < 1) return;
+    if(input.length > 300 || output.length > 300) return;
+
     net.train([{
-        input: train_input,
-        output: train_output
+        input: input,
+        output: output
     }], {
         iterations: 1000
     });
-    console.log("Trained!");
-});
+
+    fs.writeFile("network.json", JSON.stringify(net.toJSON()));
+    console.log("Done training, and saved.");
+}
 
 commands.on("save", message => {
     fs.writeFileSync("network.json", JSON.stringify(net.toJSON()));
-    console.log("Saved net!");
     message.reply("Saved net!")
 })
 
@@ -92,10 +116,10 @@ commands.on("help", message => {
                 name: client.user.username,
                 icon_url: client.user.avatarURL
             },
-            description: "Hello! I'm a bot based on Machine Learning. You can teach me how to act! [Check out my code on Github](https://github.com/Yogsther/livfor.it-bot)",
+            description: "Hello! I'm a bot based on Machine Learning. You can teach me how to act! I listen to conversations in this channel and learn... [Check out my code on Github](https://github.com/Yogsther/livfor.it-bot)",
             fields: [{
                     name: "To talk with me:",
-                    value: "Just @ me with your message, Ex. ```@" + client.user.tag + " Hello!``` or you can chat with me in private (you can also teach me in private...)"
+                    value: "Just @ me with your message or use !talk, Ex. ```@" + client.user.tag + " Hello!``` or you can chat with me in private (you can also teach me in private...)"
                 },
                 {
                     name: "To teach me:",
@@ -115,26 +139,58 @@ commands.on("help", message => {
     });
 })
 
-
-client.on("ready", () => {
-    console.log(client.user.tag + " is ready to roll!");
-    client.user.setActivity("Machine Learning Bot | !help")
-})
-
 client.on("message", message => {
     if (message.author.tag == client.user.tag) return;
+    
     /* message.channel.send(message.content); */
     if (message.content.split(" ")[0].substr(0, 1) == "!") { // Message starts with "!", i.e a command.
         try {
-            commands.emit(message.content.split(" ")[0].substr(1), message); // Run command, with the message
+            var command = message.content.split(" ")[0].substr(1);
+            if(commands.test(command)){ // Test that the command exists.
+                commands.emit(command, message); // Run command, with the message.
+            }
         } catch (e) {
             console.log("Not a command or failed.", e)
         }
     } else if (message.isMemberMentioned(client.user) || message.channel.type == "dm") {
-        // Bot is mentioned, talk with the user.
-        commands.emit("talk", message);
-    }
+        // Bot is mentioned or is in DM, talk with the user.
+        try{
+            commands.emit("talk", message);            
+        } catch(e){ console.log(e) }
+    } else {
+        // If it was not directed tworards the bot
+        // See what the reponse from the bot would be to that message, if it's of certain length - send it.
+        var response = net.run(message.content);
+        if(response.length > 10) message.reply(response);
 
+        // Passive learning
+        loop_messages(new Message(message));
+    }
+})
+
+function loop_messages(new_message){
+    var now = Date.now();
+    for(i = messages.length-1; i >= 0; i--){ // Backwards loop to get the freshest messages first!
+        message = messages[i];
+        if(messages.date < now - conversation_timeout){
+            messages.splice(i, 1); // Remove old messages, (older than conversation_timout)
+        } else {
+            if(message.channel == new_message.channel){
+                // Same channel
+                try{
+                    console.log("Passive learning | Input: '" + message.content + "' output: '" + new_message.content + "'");
+                    train(message.content, new_message.content); // Train the net on this answer.
+                } catch(e){console.log(e)}
+                break;
+            }
+        }
+    }
+    messages.push(new_message); // Push the new message
+}
+
+client.on("ready", () => {
+    console.log(client.user.tag + " is ready to roll!");
+    client.user.setActivity("Machine Learning Bot | !help")
 })
 
 client.login(fs.readFileSync("token", "utf8")); // Login using token file, listed in the gitignore.
