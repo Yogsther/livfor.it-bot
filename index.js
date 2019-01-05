@@ -48,7 +48,11 @@ const commands = new Emitter();
 
 commands.on("talk", message => {
     // Talk with user.
-    var run_data = message.content.substr(message.content.indexOf(" ")+1).trim();
+    var run_data = message.content.trim();
+    if(message.content[0] == "!" || message.isMemberMentioned(client.user)){
+        run_data = message.content.substr(message.content.indexOf(" ")+1).trim();
+    }
+    
     var response = net.run(run_data);
     console.log("Talk | Input: '" + run_data + "' Response: '" + response + "'");
     message.reply(response);
@@ -172,7 +176,7 @@ function loop_messages(new_message){
     var now = Date.now();
     for(i = messages.length-1; i >= 0; i--){ // Backwards loop to get the freshest messages first!
         message = messages[i];
-        if(messages.date < now - conversation_timeout){
+        if(message.date < now - conversation_timeout){
             messages.splice(i, 1); // Remove old messages, (older than conversation_timout)
         } else {
             if(message.channel == new_message.channel){
